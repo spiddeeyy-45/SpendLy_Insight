@@ -1,3 +1,4 @@
+// ================= IMPORTS =================
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -6,16 +7,18 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 dotenv.config();
 
+// ================= APP =================
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "50kb" }));
 
-// ---------------- CONFIG ----------------
 const PORT = process.env.PORT || 3000;
+
+// ================= KEYS =================
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const GROQ_KEY = process.env.GROQ_API_KEY;
 
-// ---------------- AI SETUP ----------------
+// ================= AI CLIENTS =================
 const genAI = new GoogleGenerativeAI(GEMINI_KEY);
 
 const groq = new OpenAI({
@@ -23,15 +26,29 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 
-// ---------------- TEMP STORE ----------------
-const userUsage = {};
+// ================= MEMORY STORE (TEMP) =================
+const chatUsage = {};
 
-// ---------------- UTIL ----------------
+// ================= UTILS =================
 const isValidNumber = (n) =>
   typeof n === "number" && Number.isFinite(n);
 
-const safeTrim = (text, maxChars = 280) =>
-  text?.length > maxChars ? text.slice(0, maxChars) : text || "";
+const safeTrim = (text, max = 300) => {
+  if (!text || text.length <= max) return text || "";
+
+  let trimmed = text.slice(0, max);
+  const lastDot = trimmed.lastIndexOf(".");
+  const lastNewLine = trimmed.lastIndexOf("\n");
+  const lastBullet = trimmed.lastIndexOf("•");
+
+  const cutIndex = Math.max(lastDot, lastNewLine, lastBullet);
+
+  if (cutIndex > 0) {
+    return trimmed.slice(0, cutIndex).trim();
+  }
+
+  return trimmed;
+};
 
 const getTopCategory = (map) => {
   try {
@@ -43,20 +60,18 @@ const getTopCategory = (map) => {
   }
 };
 
-// Timeout wrapper (important in production)
-const withTimeout = (promise, ms = 5000) => {
-  return Promise.race([
+const withTimeout = (promise, ms = 5000) =>
+  Promise.race([
     promise,
     new Promise((_, reject) =>
       setTimeout(() => reject(new Error("Timeout")), ms)
     ),
   ]);
-};
 
-// ---------------- GEMINI SAFE CALL ----------------
+// ================= AI CALLS =================
 const GEMINI_MODELS = [
-  "gemini-1.5-flash-latest",
-  "gemini-1.5-pro-latest"
+  "gemini-flash-latest",
+  "gemini-pro-latest",
 ];
 
 async function callGemini(prompt) {
@@ -73,23 +88,22 @@ async function callGemini(prompt) {
       if (text) return text;
 
     } catch (err) {
-      console.warn(`Gemini model ${modelName} failed:`, err.message);
+      console.warn(`Gemini ${modelName} failed:`, err.message);
     }
   }
-  throw new Error("All Gemini models failed");
+  throw new Error("Gemini failed");
 }
 
-// ---------------- GROQ SAFE CALL ----------------
 async function callGroq(prompt) {
   const completion = await withTimeout(
     groq.chat.completions.create({
       model: "llama-3.1-8b-instant",
       messages: [
-        { role: "system", content: "You are a strict financial advisor." },
+        { role: "system", content: "You are a smart financial advisor." },
         { role: "user", content: prompt },
       ],
-      max_tokens: 120,
-      temperature: 0.5,
+      max_tokens: 150,
+      temperature: 0.6,
     }),
     5000
   );
@@ -97,47 +111,32 @@ async function callGroq(prompt) {
   return completion?.choices?.[0]?.message?.content || "";
 }
 
-// ---------------- HEALTH ----------------
+// ================= HEALTH =================
 app.get("/", (_, res) => {
   res.send("AI Backend Running 🚀");
 });
 
-// ---------------- AI ENDPOINT ----------------
+// =====================================================
+// ✅ 1. INSIGHT ENDPOINT (NO LIMIT)
+// =====================================================
 app.post("/ai", async (req, res) => {
-  const startTime = Date.now();
+  const start = Date.now();
 
   try {
     const { userId, income, totalExpense, categoryBreakdown } = req.body;
 
-    // ---------------- VALIDATION ----------------
-    if (!userId || typeof userId !== "string") {
-      return res.status(400).json({ error: "Invalid userId" });
-    }
+    // -------- VALIDATION --------
+    if (!userId) return res.status(400).json({ error: "Invalid userId" });
 
     if (!isValidNumber(income) || !isValidNumber(totalExpense)) {
-      return res.status(400).json({ error: "Invalid financial values" });
+      return res.status(400).json({ error: "Invalid numbers" });
     }
 
-    if (
-      !categoryBreakdown ||
-      typeof categoryBreakdown !== "object" ||
-      Array.isArray(categoryBreakdown)
-    ) {
+    if (!categoryBreakdown || typeof categoryBreakdown !== "object") {
       return res.status(400).json({ error: "Invalid category data" });
     }
 
-    // ---------------- RATE LIMIT ----------------
-    userUsage[userId] = userUsage[userId] || 0;
-
-    if (userUsage[userId] >= 5) {
-      return res.status(403).json({
-        error: "Free limit reached. Upgrade to premium.",
-      });
-    }
-
-    userUsage[userId]++;
-
-    // ---------------- BUSINESS LOGIC ----------------
+    // -------- BUSINESS LOGIC --------
     const overspending = totalExpense - income;
 
     const status =
@@ -147,9 +146,9 @@ app.post("/ai", async (req, res) => {
 
     const topCategory = getTopCategory(categoryBreakdown);
 
-    // ---------------- PROMPT ----------------
+    // -------- PROMPT --------
     const prompt = `
-You are a concise financial advisor.
+You are a financial advisor.
 
 User:
 Status: ${status}
@@ -157,9 +156,9 @@ Top Category: ${topCategory}
 
 Rules:
 - Max 60 words
-- No income/total mention
-- 3 practical tips
-- Use • bullets
+- 3 bullet tips
+- Practical advice
+- Friendly tone
 
 Format:
 Status: ...
@@ -169,45 +168,100 @@ Tips:
 • ...
 `;
 
-    // ---------------- AI EXECUTION ----------------
+    // -------- AI EXECUTION --------
     let reply = "";
     let source = "gemini";
 
     try {
       reply = await callGemini(prompt);
-    } catch (geminiErr) {
-      console.warn("Gemini failed → fallback to Groq");
+    } catch {
+      reply = await callGroq(prompt);
+      source = "groq";
+    }
+    console.log("Insight AI Source:", source);
 
-      try {
-        reply = await callGroq(prompt);
-        source = "groq";
-      } catch (groqErr) {
-        console.error("Groq failed:", groqErr.message);
-        return res.status(503).json({
-          error: "AI services unavailable",
-        });
-      }
+    if (!reply) {
+      reply = "Unable to generate insight. Try again.";
     }
 
-    // ---------------- RESPONSE ----------------
-    const response = {
-      reply: safeTrim(reply),
+    return res.json({
+      reply: safeTrim(reply, 300),
       source,
-      latencyMs: Date.now() - startTime,
-    };
-
-    return res.json(response);
+      latencyMs: Date.now() - start,
+    });
 
   } catch (err) {
-    console.error("Unhandled error:", err.message);
-
-    return res.status(500).json({
-      error: "Internal server error",
-    });
+    console.error(err.message);
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
-// ---------------- START SERVER ----------------
+// =====================================================
+// ✅ 2. CHAT ENDPOINT (LIMIT = 15)
+// =====================================================
+app.post("/aichat", async (req, res) => {
+  try {
+  
+    const { userId, message, income, totalExpense, categoryBreakdown } = req.body;
+
+    if (!userId) return res.status(400).json({ error: "Invalid userId" });
+    if (!message) return res.status(400).json({ error: "Message required" });
+
+    chatUsage[userId] = chatUsage[userId] || 0;
+
+    if (chatUsage[userId] >= 15) {
+      return res.status(403).json({
+        error: "Free limit reached. Upgrade to premium.",
+      });
+    }
+
+    chatUsage[userId]++;
+
+    const topCategory = getTopCategory(categoryBreakdown);
+
+    const status =
+      totalExpense > income
+        ? `Overspending`
+        : `Within budget`;
+
+    const prompt = `
+You are a smart personal finance assistant.
+
+User Financial Context:
+- Status: ${status}
+- Top Spending Category: ${topCategory}
+
+User Question:
+${message}
+
+Rules:
+- DO NOT mention exact numbers
+- Give practical tips
+- Max 80 words
+`;
+
+    let reply = "";
+    let source = "gemini";
+
+    try {
+      reply = await callGemini(prompt);
+    } catch {
+      reply = await callGroq(prompt);
+      source = "groq";
+    }
+
+    return res.json({
+      reply: safeTrim(reply, 400),
+      source,
+      remaining: 15 - chatUsage[userId],
+    });
+
+  } catch (err) {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ================= START =================
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
