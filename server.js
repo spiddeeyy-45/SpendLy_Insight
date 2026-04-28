@@ -1,4 +1,4 @@
-// ================= IMPORTS =================
+
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -26,7 +26,6 @@ const groq = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
 });
 
-// ================= MEMORY STORE (TEMP) =================
 const chatUsage = {};
 
 // ================= UTILS =================
@@ -116,9 +115,6 @@ app.get("/", (_, res) => {
   res.send("AI Backend Running 🚀");
 });
 
-// =====================================================
-// ✅ 1. INSIGHT ENDPOINT (NO LIMIT)
-// =====================================================
 app.post("/ai", async (req, res) => {
   const start = Date.now();
 
@@ -196,9 +192,6 @@ Tips:
   }
 });
 
-// =====================================================
-// ✅ 2. CHAT ENDPOINT (LIMIT = 15)
-// =====================================================
 app.post("/aichat", async (req, res) => {
   try {
   
